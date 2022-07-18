@@ -8,6 +8,7 @@ from tqdm import tqdm, trange
 
 from nerf import cumprod_exclusive, get_minibatches, get_ray_bundle, positional_encoding
 
+import coremltools as ct
 
 def compute_query_points_from_rays(
     ray_origins: torch.Tensor,
@@ -121,6 +122,8 @@ def run_one_iter_of_tinynerf(
     chunksize,
     model,
     encoding_function_args,
+    i,
+    saveModel
 ):
 
     # Get the "bundle" of rays through all image pixels.
@@ -144,7 +147,19 @@ def run_one_iter_of_tinynerf(
     batches = get_minibatches_function(encoded_points, chunksize=chunksize)
     predictions = []
     for batch in batches:
-        predictions.append(model(batch))
+        prediction = model(batch)
+        predictions.append(prediction)
+        if saveModel:
+            model.eval()
+            traced_model = torch.jit.trace(model, batch)
+            modelml = ct.convert(
+                traced_model,
+                inputs = [ct.TensorType(shape=batch.shape)]
+            )
+            moddir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "models")
+            os.makedirs(moddir, exist_ok=True)
+            filename = os.path.join(moddir, "nerf_" + str(i).zfill(6) + ".mlmodel")
+            modelml.save(filename)
     radiance_field_flattened = torch.cat(predictions, dim=0)
 
     # "Unflatten" to obtain the radiance field.
@@ -244,7 +259,7 @@ def main():
 
     # Misc parameters
     display_every = 100  # Number of iters after which stats are
-
+    save_every = 1000
     """
     Model
     """
@@ -290,6 +305,8 @@ def main():
             chunksize,
             model,
             num_encoding_functions,
+            i,
+            False
         )
 
         # Compute mean-squared error between the predicted and target images. Backprop!
@@ -299,6 +316,26 @@ def main():
         optimizer.zero_grad()
 
         # Display images/plots/stats
+        if i % save_every == 0:
+
+            rgb_predicted = run_one_iter_of_tinynerf(
+                height,
+                width,
+                focal_length,
+                testpose,
+                near_thresh,
+                far_thresh,
+                depth_samples_per_ray,
+                encode,
+                get_minibatches,
+                chunksize,
+                model,
+                num_encoding_functions,
+                i,
+                True
+            )
+
+
         if i % display_every == 0 or i == num_iters - 1:
             # Render the held-out view
             rgb_predicted = run_one_iter_of_tinynerf(
@@ -314,6 +351,8 @@ def main():
                 chunksize,
                 model,
                 num_encoding_functions,
+                i,
+                False
             )
             loss = torch.nn.functional.mse_loss(rgb_predicted, target_img)
             tqdm.write("Loss: " + str(loss.item()))
